@@ -1,0 +1,6 @@
+build/
+outputs/csv/*.csv
+outputs/figures/*.png
+*.zip
+__pycache__/
+.pytest_cache/
