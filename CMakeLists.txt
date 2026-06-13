@@ -10,6 +10,7 @@ add_library(astrodyn
     src/astro.cpp
     src/integrators.cpp
     src/csv.cpp
+    src/body_catalog.cpp
 )
 
 target_include_directories(astrodyn PUBLIC include)

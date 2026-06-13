@@ -1,6 +1,8 @@
 #include "astrodyn/astro.hpp"
+#include "astrodyn/body_catalog.hpp"
 #include "astrodyn/csv.hpp"
 #include "astrodyn/integrators.hpp"
+#include "astrodyn/sandbox_world.hpp"
 
 #include <SFML/Graphics.hpp>
 #include <algorithm>
@@ -15,30 +17,123 @@ using namespace astrodyn;
 
 namespace {
 
-enum class IntegratorChoice {
-    ExplicitEuler,
-    SymplecticEuler,
-    VelocityVerlet,
-    RK4
-};
+std::string integrator_name(IntegratorChoice integrator) {
+    switch (integrator) {
+        case IntegratorChoice::ExplicitEuler: return "Explicit Euler";
+        case IntegratorChoice::SymplecticEuler: return "Symplectic Euler";
+        case IntegratorChoice::VelocityVerlet: return "Velocity Verlet";
+        case IntegratorChoice::RK4: return "RK4";
+    }
+    return "Unknown";
+}
 
-struct ActiveBody {
-    Body2D body;
-    bool gravity_enabled = true;
-    sf::Color color = sf::Color::White;
-    float draw_radius_px = 8.0f;
-};
 
-struct SandboxScenario {
-    std::string name;
-    std::vector<ActiveBody> bodies;
-    State2D spacecraft;
-    double dt_s = 10.0;
-    double max_time_s = 2.0 * 3600.0;
-    double meters_per_pixel = 20000.0;
-    Vec2 camera_center_m{0.0, 0.0};
-    double default_energy_mu_m3_s2 = MU_EARTH_M3_S2;
-};
+std::vector<Body2D> enabled_gravity_bodies(const SandboxWorld2D& world) {
+    std::vector<Body2D> out;
+
+    for (const auto& obj : world.objects) {
+        if (!obj.gravity_source) continue;
+        if (!obj.gravity_enabled) continue;
+
+        Body2D b;
+        b.name = obj.name;
+        b.mu_m3_s2 = obj.mu_m3_s2;
+        b.radius_m = obj.radius_m;
+        b.state = obj.state;
+        b.fixed = !obj.dynamic;
+
+        out.push_back(b);
+    }
+
+    return out;
+}
+
+sf::Vector2f world_to_screen(
+    const Vec2& r_m,
+    const SandboxWorld2D& world,
+    const sf::RenderWindow& window
+) {
+    const auto size = window.getSize();
+
+    const double sx =
+        static_cast<double>(size.x) * 0.5
+        + (r_m.x - world.camera_center_m.x) / world.meters_per_pixel;
+
+    const double sy =
+        static_cast<double>(size.y) * 0.5
+        - (r_m.y - world.camera_center_m.y) / world.meters_per_pixel;
+
+    return sf::Vector2f(static_cast<float>(sx), static_cast<float>(sy));
+}
+
+void push_trail_point(std::vector<Vec2>& trail, const Vec2& r_m, std::size_t max_points = 8000) {
+    trail.push_back(r_m);
+    if (trail.size() > max_points) {
+        trail.erase(trail.begin(), trail.begin() + static_cast<long>(trail.size() - max_points));
+    }
+}
+
+
+void step_single_object(
+    SimObject2D& obj,
+    double t_s,
+    double dt_s,
+    const SandboxWorld2D& world,
+    IntegratorChoice integrator,
+    const FiniteBurnCommand& burn
+) {
+    State2D state = obj.state;
+
+    const auto accel = [&](const State2D& s, double) {
+        return n_body_accel_on_test_particle(s.r_m, enabled_gravity_bodies(world));
+    };
+
+    switch (integrator) {
+        case IntegratorChoice::ExplicitEuler:
+            if (burn.active) step_rk4(state, t_s, dt_s, accel, burn);
+            else step_explicit_euler(state, t_s, dt_s, accel);
+            break;
+
+        case IntegratorChoice::SymplecticEuler:
+            if (burn.active) step_rk4(state, t_s, dt_s, accel, burn);
+            else step_symplectic_euler(state, t_s, dt_s, accel);
+            break;
+
+        case IntegratorChoice::VelocityVerlet:
+            if (burn.active) step_rk4(state, t_s, dt_s, accel, burn);
+            else step_velocity_verlet(state, t_s, dt_s, accel);
+            break;
+
+        case IntegratorChoice::RK4:
+            step_rk4(state, t_s, dt_s, accel, burn);
+            break;
+    }
+
+    obj.state = state;
+}
+
+void step_world(SandboxWorld2D& world) {
+    for (int i = 0; i < static_cast<int>(world.objects.size()); ++i) {
+        auto& obj = world.objects[i];
+
+        if (!obj.dynamic) continue;
+
+        FiniteBurnCommand burn;
+        burn.active = false;
+
+        if (i == world.active_vehicle_index && world.finite_burn_on && obj.state.m_kg > 1.0) {
+            burn.active = true;
+            burn.thrust_N = 250.0;
+            burn.isp_s = 230.0;
+            burn.direction_mode = FiniteBurnCommand::DirectionMode::Prograde;
+        }
+
+        step_single_object(obj, world.t_s, world.dt_s, world, world.integrator, burn);
+        push_trail_point(obj.trail_m, obj.state.r_m);
+    }
+
+    world.t_s += world.dt_s;
+}
 
 std::string integrator_name(IntegratorChoice integrator) {
     switch (integrator) {
@@ -50,21 +145,6 @@ std::string integrator_name(IntegratorChoice integrator) {
     return "Unknown";
 }
 
-std::vector<Body2D> enabled_gravity_bodies(const std::vector<ActiveBody>& active_bodies) {
-    std::vector<Body2D> out;
-    for (const auto& active : active_bodies) {
-        if (active.gravity_enabled) out.push_back(active.body);
-    }
-    return out;
-}
-
-sf::Vector2f world_to_screen(const Vec2& r_m, const SandboxScenario& scenario, const sf::RenderWindow& window) {
-    const auto size = window.getSize();
-    const double sx = static_cast<double>(size.x) * 0.5 + (r_m.x - scenario.camera_center_m.x) / scenario.meters_per_pixel;
-    const double sy = static_cast<double>(size.y) * 0.5 - (r_m.y - scenario.camera_center_m.y) / scenario.meters_per_pixel;
-    return sf::Vector2f(static_cast<float>(sx), static_cast<float>(sy));
-}
-
 void push_trail_point(std::vector<Vec2>& trail, const Vec2& r_m, std::size_t max_points = 8000) {
     trail.push_back(r_m);
     if (trail.size() > max_points) {
@@ -72,160 +152,163 @@ void push_trail_point(std::vector<Vec2>& trail, const Vec2& r_m, std::size_t max
     }
 }
 
-SandboxScenario make_earth_leo() {
-    SandboxScenario s;
-    s.name = "Earth LEO - single spacecraft";
-    s.dt_s = 10.0;
-    s.max_time_s = 6.0 * 5400.0;
-    s.meters_per_pixel = 18000.0;
-    s.default_energy_mu_m3_s2 = MU_EARTH_M3_S2;
-
-    ActiveBody earth;
-    earth.body.name = "Earth";
-    earth.body.mu_m3_s2 = MU_EARTH_M3_S2;
-    earth.body.radius_m = R_EARTH_M;
-    earth.body.state.r_m = {0.0, 0.0};
-    earth.body.state.v_m_s = {0.0, 0.0};
-    earth.body.fixed = true;
-    earth.color = sf::Color(70, 120, 255);
-    earth.draw_radius_px = 18.0f;
-    s.bodies.push_back(earth);
-
-    s.spacecraft = circular_orbit_state(R_EARTH_M, 500e3, MU_EARTH_M3_S2, 0.0, 500.0);
-    return s;
+void clear_all_trails(SandboxWorld2D& world) {
+    for (auto& obj : world.objects) {
+        obj.trail_m.clear();
+    }
 }
 
-SandboxScenario make_earth_moon() {
-    SandboxScenario s;
-    s.name = "Earth + Moon perturbation";
-    s.dt_s = 60.0;
-    s.max_time_s = 10.0 * DAY_S;
-    s.meters_per_pixel = 1.4e6;
-    s.default_energy_mu_m3_s2 = MU_EARTH_M3_S2;
+void select_next_object(SandboxWorld2D& world) {
+    if (world.objects.empty()) {
+        world.selected_index = -1;
+        return;
+    }
 
-    ActiveBody earth;
-    earth.body.name = "Earth";
-    earth.body.mu_m3_s2 = MU_EARTH_M3_S2;
-    earth.body.radius_m = R_EARTH_M;
-    earth.body.fixed = true;
-    earth.color = sf::Color(70, 120, 255);
-    earth.draw_radius_px = 13.0f;
-    s.bodies.push_back(earth);
+    world.selected_index = (world.selected_index + 1) % static_cast<int>(world.objects.size());
 
-    const double moon_r_m = 384400e3;
-    ActiveBody moon;
-    moon.body.name = "Moon";
-    moon.body.mu_m3_s2 = 4.9048695e12;
-    moon.body.radius_m = 1737.4e3;
-    moon.body.state.r_m = {moon_r_m, 0.0};
-    moon.body.state.v_m_s = {0.0, std::sqrt(MU_EARTH_M3_S2 / moon_r_m)};
-    moon.body.fixed = false;
-    moon.color = sf::Color(190, 190, 190);
-    moon.draw_radius_px = 7.0f;
-    s.bodies.push_back(moon);
-
-    s.spacecraft = circular_orbit_state(R_EARTH_M, 250000e3, MU_EARTH_M3_S2, 0.3, 500.0);
-    return s;
+    for (int i = 0; i < static_cast<int>(world.objects.size()); ++i) {
+        world.objects[i].selected = (i == world.selected_index);
+    }
 }
 
-SandboxScenario make_sun_jupiter_asteroid() {
-    SandboxScenario s;
-    s.name = "Sun + Jupiter + asteroid";
-    s.dt_s = 0.5 * DAY_S;
-    s.max_time_s = 12.0 * 365.25 * DAY_S;
-    s.meters_per_pixel = 2.0e9;
-    s.default_energy_mu_m3_s2 = MU_SUN_M3_S2;
+void select_previous_object(SandboxWorld2D& world) {
+    if (world.objects.empty()) {
+        world.selected_index = -1;
+        return;
+    }
 
-    ActiveBody sun;
-    sun.body.name = "Sun";
-    sun.body.mu_m3_s2 = MU_SUN_M3_S2;
-    sun.body.radius_m = 696340e3;
-    sun.body.fixed = true;
-    sun.color = sf::Color(255, 210, 60);
-    sun.draw_radius_px = 16.0f;
-    s.bodies.push_back(sun);
+    world.selected_index -= 1;
+    if (world.selected_index < 0) {
+        world.selected_index = static_cast<int>(world.objects.size()) - 1;
+    }
 
-    const double jupiter_a_m = 5.2 * AU_M;
-    ActiveBody jupiter;
-    jupiter.body.name = "Jupiter";
-    jupiter.body.mu_m3_s2 = MU_JUPITER_M3_S2;
-    jupiter.body.radius_m = 69911e3;
-    jupiter.body.state.r_m = {jupiter_a_m, 0.0};
-    jupiter.body.state.v_m_s = {0.0, std::sqrt(MU_SUN_M3_S2 / jupiter_a_m)};
-    jupiter.body.fixed = false;
-    jupiter.color = sf::Color(220, 160, 100);
-    jupiter.draw_radius_px = 8.0f;
-    s.bodies.push_back(jupiter);
-
-    const double asteroid_a_m = 3.25 * AU_M;
-    s.spacecraft.r_m = {asteroid_a_m, 0.0};
-    s.spacecraft.v_m_s = {0.0, std::sqrt(MU_SUN_M3_S2 / asteroid_a_m) * 0.985};
-    s.spacecraft.m_kg = 1.0;
-    return s;
+    for (int i = 0; i < static_cast<int>(world.objects.size()); ++i) {
+        world.objects[i].selected = (i == world.selected_index);
+    }
 }
 
-SandboxScenario make_gravity_assist() {
-    SandboxScenario s;
-    s.name = "Moving planet flyby";
-    s.dt_s = 120.0;
-    s.max_time_s = 14.0 * DAY_S;
-    s.meters_per_pixel = 2.2e7;
-    s.default_energy_mu_m3_s2 = MU_EARTH_M3_S2;
-
-    ActiveBody earth;
-    earth.body.name = "Earth";
-    earth.body.mu_m3_s2 = MU_EARTH_M3_S2;
-    earth.body.radius_m = R_EARTH_M;
-    earth.body.fixed = false;
-    earth.body.state.r_m = {0.0, 0.0};
-    earth.body.state.v_m_s = {0.0, 0.0};
-    earth.color = sf::Color(70, 120, 255);
-    earth.draw_radius_px = 13.0f;
-    s.bodies.push_back(earth);
-
-    s.spacecraft.r_m = {-70.0 * R_EARTH_M, -12.0 * R_EARTH_M};
-    s.spacecraft.v_m_s = {10500.0, 1700.0};
-    s.spacecraft.m_kg = 500.0;
-    return s;
+SimObject2D* selected_object(SandboxWorld2D& world) {
+    if (world.selected_index < 0) return nullptr;
+    if (world.selected_index >= static_cast<int>(world.objects.size())) return nullptr;
+    return &world.objects[world.selected_index];
 }
 
-SandboxScenario make_finite_burn_raise() {
-    SandboxScenario s = make_earth_leo();
-    s.name = "Earth LEO with manual finite/prograde burns";
-    s.dt_s = 2.0;
-    s.max_time_s = 3.0 * 5400.0;
-    s.spacecraft.m_kg = 600.0;
-    return s;
+const SimObject2D* selected_object_const(const SandboxWorld2D& world) {
+    if (world.selected_index < 0) return nullptr;
+    if (world.selected_index >= static_cast<int>(world.objects.size())) return nullptr;
+    return &world.objects[world.selected_index];
 }
 
-void step_spacecraft(
-    State2D& spacecraft,
-    double t_s,
-    double dt_s,
-    const std::vector<ActiveBody>& active_bodies,
-    IntegratorChoice integrator,
-    const FiniteBurnCommand& burn
-) {
-    const auto accel = [&](const State2D& sc, double) {
-        return n_body_accel_on_test_particle(sc.r_m, enabled_gravity_bodies(active_bodies));
-    };
+void toggle_selected_gravity(SandboxWorld2D& world) {
+    SimObject2D* obj = selected_object(world);
+    if (!obj) return;
+    if (!obj->gravity_source) return;
 
-    switch (integrator) {
-        case IntegratorChoice::ExplicitEuler:
-            if (burn.active) step_rk4(spacecraft, t_s, dt_s, accel, burn);
-            else step_explicit_euler(spacecraft, t_s, dt_s, accel);
-            break;
-        case IntegratorChoice::SymplecticEuler:
-            if (burn.active) step_rk4(spacecraft, t_s, dt_s, accel, burn);
-            else step_symplectic_euler(spacecraft, t_s, dt_s, accel);
-            break;
-        case IntegratorChoice::VelocityVerlet:
-            if (burn.active) step_rk4(spacecraft, t_s, dt_s, accel, burn);
-            else step_velocity_verlet(spacecraft, t_s, dt_s, accel);
-            break;
-        case IntegratorChoice::RK4:
-            step_rk4(spacecraft, t_s, dt_s, accel, burn);
-            break;
+    obj->gravity_enabled = !obj->gravity_enabled;
+    std::cout << obj->name << " gravity "
+              << (obj->gravity_enabled ? "enabled" : "disabled") << "\n";
+}
+
+void toggle_selected_dynamic(SandboxWorld2D& world) {
+    SimObject2D* obj = selected_object(world);
+    if (!obj) return;
+
+    obj->dynamic = !obj->dynamic;
+    std::cout << obj->name << " dynamic "
+              << (obj->dynamic ? "enabled" : "disabled/fixed") << "\n";
+}
+
+void set_selected_as_active_vehicle(SandboxWorld2D& world) {
+    SimObject2D* obj = selected_object(world);
+    if (!obj) return;
+
+    world.active_vehicle_index = world.selected_index;
+    obj->type = SimObjectType::Spacecraft;
+    obj->gravity_source = false;
+    obj->gravity_enabled = false;
+    obj->dynamic = true;
+
+    std::cout << obj->name << " is now active vehicle\n";
+}
+
+void add_earth_at_origin(SandboxWorld2D& world) {
+    SimObject2D earth;
+    earth.name = "Earth";
+    earth.type = SimObjectType::MassiveBody;
+    earth.mu_m3_s2 = MU_EARTH_M3_S2;
+    earth.radius_m = R_EARTH_M;
+    earth.state.r_m = {0.0, 0.0};
+    earth.state.v_m_s = {0.0, 0.0};
+    earth.gravity_source = true;
+    earth.gravity_enabled = true;
+    earth.dynamic = false;
+    earth.color_r = 70;
+    earth.color_g = 120;
+    earth.color_b = 255;
+    earth.draw_radius_px = 16.0f;
+
+    world.objects.push_back(earth);
+    world.selected_index = static_cast<int>(world.objects.size()) - 1;
+    select_next_object(world);
+}
+
+void add_test_particle_near_selected(SandboxWorld2D& world) {
+    const SimObject2D* parent = selected_object_const(world);
+    if (!parent) {
+        std::cout << "Select a parent body first\n";
+        return;
+    }
+
+    SimObject2D particle;
+    particle.name = "TestParticle";
+    particle.type = SimObjectType::TestParticle;
+    particle.mu_m3_s2 = 0.0;
+    particle.radius_m = 0.0;
+    particle.state.m_kg = 1.0;
+
+    const double r_m = parent->radius_m + 500e3;
+    const Vec2 rel_r{r_m, 0.0};
+    const Vec2 rel_v{0.0, std::sqrt(parent->mu_m3_s2 / r_m)};
+
+    particle.state.r_m = parent->state.r_m + rel_r;
+    particle.state.v_m_s = parent->state.v_m_s + rel_v;
+
+    particle.gravity_source = false;
+    particle.gravity_enabled = false;
+    particle.dynamic = true;
+    particle.color_r = 100;
+    particle.color_g = 255;
+    particle.color_b = 160;
+    particle.draw_radius_px = 5.0f;
+
+    world.objects.push_back(particle);
+    world.selected_index = static_cast<int>(world.objects.size()) - 1;
+    world.active_vehicle_index = world.selected_index;
+    select_next_object(world);
+}
+
+void remove_selected_object(SandboxWorld2D& world) {
+    if (world.selected_index < 0) return;
+    if (world.selected_index >= static_cast<int>(world.objects.size())) return;
+
+    std::cout << "Removed " << world.objects[world.selected_index].name << "\n";
+
+    world.objects.erase(world.objects.begin() + world.selected_index);
+
+    if (world.objects.empty()) {
+        world.selected_index = -1;
+        world.active_vehicle_index = -1;
+        return;
+    }
+
+    world.selected_index = std::min(world.selected_index, static_cast<int>(world.objects.size()) - 1);
+
+    if (world.active_vehicle_index >= static_cast<int>(world.objects.size())) {
+        world.active_vehicle_index = -1;
+    }
+
+    for (int i = 0; i < static_cast<int>(world.objects.size()); ++i) {
+        world.objects[i].selected = (i == world.selected_index);
     }
 }
 
