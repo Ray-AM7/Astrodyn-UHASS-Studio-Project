@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 
+
 namespace astrodyn {
 
 static double clamp(double x, double lo, double hi) {
