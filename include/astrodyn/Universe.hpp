@@ -16,7 +16,7 @@ public:
 
     void clear();
 
-    int addObject(std::unique_ptr<SpaceObject> obj);
+    int addObject(std::unique_ptr<SpaceObject> obj, bool placeRelativeToSelected = true);
     int addLargeBody();
     int addSmallBody();
     int addSpaceCraft();

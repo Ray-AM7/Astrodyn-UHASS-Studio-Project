@@ -1,6 +1,7 @@
 #include "astrodyn/Universe.hpp"
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace astrodyn {
 
@@ -19,10 +20,12 @@ void Universe::clear() {
     time_s_ = 0.0;
 }
 
-int Universe::addObject(std::unique_ptr<SpaceObject> obj) {
+int Universe::addObject(std::unique_ptr<SpaceObject> obj, bool placeRelativeToSelected) {
     if (!obj) return -1;
 
-    if (selectedIndex_ >= 0 && selectedIndex_ < static_cast<int>(objects_.size())) {
+    if (placeRelativeToSelected &&
+        selectedIndex_ >= 0 &&
+        selectedIndex_ < static_cast<int>(objects_.size())) {
         const SpaceObject* parent = objects_[selectedIndex_].get();
         obj->setPosition(parent->position() + Vec2{spawnDistanceFromSelected_m, 0.0});
         obj->setVelocity(parent->velocity());
@@ -168,9 +171,14 @@ void Universe::resolveCollisions() {
     if (!collisionsEnabled) return;
 
     const int n = static_cast<int>(objects_.size());
+    std::set<int> removeIndices;
 
     for (int i = 0; i < n; ++i) {
+        if (removeIndices.count(i)) continue;
+
         for (int j = i + 1; j < n; ++j) {
+            if (removeIndices.count(j)) continue;
+
             SpaceObject& a = *objects_[i];
             SpaceObject& b = *objects_[j];
 
@@ -181,7 +189,7 @@ void Universe::resolveCollisions() {
             double d = norm(delta);
             const double minD = a.radiusM() + b.radiusM();
 
-            if (d >= minD) continue;
+            if (d > minD) continue;
 
             if (d <= 1e-9) {
                 delta = {1.0, 0.0};
@@ -189,38 +197,101 @@ void Universe::resolveCollisions() {
             }
 
             const Vec2 nHat = delta / d;
-            const double overlap = minD - d;
 
-            const bool aMovable = a.isDynamic();
-            const bool bMovable = b.isDynamic();
+            SpaceObject* big = &a;
+            SpaceObject* small = &b;
+            int bigIndex = i;
+            int smallIndex = j;
 
-            if (aMovable && bMovable) {
-                a.setPosition(a.position() - 0.5 * overlap * nHat);
-                b.setPosition(b.position() + 0.5 * overlap * nHat);
-            } else if (aMovable) {
-                a.setPosition(a.position() - overlap * nHat);
-            } else if (bMovable) {
-                b.setPosition(b.position() + overlap * nHat);
+            if (b.massKg() > a.massKg()) {
+                big = &b;
+                small = &a;
+                bigIndex = j;
+                smallIndex = i;
             }
 
-            Vec2 relativeVelocity = b.velocity() - a.velocity();
-            const double normalSpeed = dot(relativeVelocity, nHat);
+            const double massRatio = big->massKg() / std::max(1e-9, small->massKg());
+            const double radiusRatio = big->radiusM() / std::max(1e-9, small->radiusM());
 
-            if (normalSpeed >= 0.0) continue;
+            const bool veryDifferent = (massRatio > 100.0 || radiusRatio > 20.0);
 
-            const double ma = std::max(1e-9, a.massKg());
-            const double mb = std::max(1e-9, b.massKg());
+            if (veryDifferent) {
+                // Stick/merge smaller object into larger body.
+                // Conservation of linear momentum:
+                const double mBig = std::max(1e-9, big->massKg());
+                const double mSmall = std::max(1e-9, small->massKg());
+                const double mNew = mBig + mSmall;
 
-            const double invMa = aMovable ? 1.0 / ma : 0.0;
-            const double invMb = bMovable ? 1.0 / mb : 0.0;
+                const Vec2 vNew = (mBig * big->velocity() + mSmall * small->velocity()) / mNew;
 
-            const double denom = invMa + invMb;
-            if (denom <= 0.0) continue;
+                // Approximate volume-equivalent radius if densities are comparable.
+                const double rNew = std::cbrt(
+                    big->radiusM() * big->radiusM() * big->radiusM()
+                    + small->radiusM() * small->radiusM() * small->radiusM()
+                );
 
-            const double impulse = -(1.0 + RESTITUTION) * normalSpeed / denom;
+                big->setVelocity(vNew);
+                big->setMassKg(mNew);
+                big->setRadiusM(std::max(big->radiusM(), rNew));
 
-            if (aMovable) a.setVelocity(a.velocity() - impulse * invMa * nHat);
-            if (bMovable) b.setVelocity(b.velocity() + impulse * invMb * nHat);
+                // Keep the bigger object selected if selected object was swallowed.
+                if (selectedIndex_ == smallIndex) {
+                    selectedIndex_ = bigIndex;
+                    big->setSelected(true);
+                }
+
+                removeIndices.insert(smallIndex);
+            } else {
+                // Comparable bodies: perfectly elastic collision along contact normal.
+                const bool aMovable = a.isDynamic();
+                const bool bMovable = b.isDynamic();
+
+                const double ma = std::max(1e-9, a.massKg());
+                const double mb = std::max(1e-9, b.massKg());
+
+                const Vec2 va = a.velocity();
+                const Vec2 vb = b.velocity();
+
+                const double vaN = dot(va, nHat);
+                const double vbN = dot(vb, nHat);
+
+                const double vaNNew = (vaN * (ma - mb) + 2.0 * mb * vbN) / (ma + mb);
+                const double vbNNew = (vbN * (mb - ma) + 2.0 * ma * vaN) / (ma + mb);
+
+                if (aMovable) a.setVelocity(va + (vaNNew - vaN) * nHat);
+                if (bMovable) b.setVelocity(vb + (vbNNew - vbN) * nHat);
+
+                // Small positional correction only to prevent repeated overlap.
+                const double overlap = minD - d;
+                if (overlap > 0.0) {
+                    if (aMovable && bMovable) {
+                        a.setPosition(a.position() - 0.5 * overlap * nHat);
+                        b.setPosition(b.position() + 0.5 * overlap * nHat);
+                    } else if (aMovable) {
+                        a.setPosition(a.position() - overlap * nHat);
+                    } else if (bMovable) {
+                        b.setPosition(b.position() + overlap * nHat);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!removeIndices.empty()) {
+        std::vector<std::unique_ptr<SpaceObject>> kept;
+        kept.reserve(objects_.size());
+
+        for (int i = 0; i < static_cast<int>(objects_.size()); ++i) {
+            if (!removeIndices.count(i)) kept.push_back(std::move(objects_[i]));
+        }
+
+        objects_ = std::move(kept);
+
+        if (objects_.empty()) {
+            selectedIndex_ = -1;
+        } else {
+            selectedIndex_ = std::clamp(selectedIndex_, 0, static_cast<int>(objects_.size()) - 1);
+            selectIndex(selectedIndex_);
         }
     }
 }
