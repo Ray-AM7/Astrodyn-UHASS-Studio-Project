@@ -37,6 +37,10 @@ struct AppState {
     bool showOrigin = true;
     bool drawTrueSizes = true;
 
+    double newObjectOrbitRadius_m = 1.0e7;
+    double impulsiveBurnDeltaV_m_s = 10.0;
+    double continuousBurnAccel_m_s2 = 0.001;
+
     bool isPanning = false;
     sf::Vector2i lastMousePos;
 
@@ -60,18 +64,28 @@ std::vector<Star> makeStars(int count, double halfExtent_m) {
 
 sf::Vector2f worldToScreen(const Vec2& r, const AppState& app, const sf::RenderWindow& window) {
     const auto size = window.getSize();
+    const Vec2 origin = app.universe.barycenterPosition();
 
-    const double sx = static_cast<double>(size.x) * 0.5 + (r.x - app.cameraCenter_m.x) / app.metersPerPixel;
-    const double sy = static_cast<double>(size.y) * 0.5 - (r.y - app.cameraCenter_m.y) / app.metersPerPixel;
+    const Vec2 displayR = r - origin;
+
+    const double sx = static_cast<double>(size.x) * 0.5
+        + (displayR.x - app.cameraCenter_m.x) / app.metersPerPixel;
+
+    const double sy = static_cast<double>(size.y) * 0.5
+        - (displayR.y - app.cameraCenter_m.y) / app.metersPerPixel;
 
     return sf::Vector2f(static_cast<float>(sx), static_cast<float>(sy));
 }
 
 Vec2 screenToWorld(const sf::Vector2i& p, const AppState& app, const sf::RenderWindow& window) {
     const auto size = window.getSize();
+    const Vec2 origin = app.universe.barycenterPosition();
 
-    const double x = app.cameraCenter_m.x + (static_cast<double>(p.x) - static_cast<double>(size.x) * 0.5) * app.metersPerPixel;
-    const double y = app.cameraCenter_m.y - (static_cast<double>(p.y) - static_cast<double>(size.y) * 0.5) * app.metersPerPixel;
+    const double x = origin.x + app.cameraCenter_m.x
+        + (static_cast<double>(p.x) - static_cast<double>(size.x) * 0.5) * app.metersPerPixel;
+
+    const double y = origin.y + app.cameraCenter_m.y
+        - (static_cast<double>(p.y) - static_cast<double>(size.y) * 0.5) * app.metersPerPixel;
 
     return {x, y};
 }
@@ -105,7 +119,7 @@ int nearestObjectIndex(const AppState& app, const sf::Vector2i& mouse, const sf:
 }
 
 void drawOrigin(sf::RenderWindow& window, const AppState& app) {
-    const sf::Vector2f o = worldToScreen({0.0, 0.0}, app, window);
+    const sf::Vector2f o = worldToScreen(app.universe.barycenterPosition(), app, window);
 
     sf::VertexArray cross(sf::Lines, 4);
     cross[0].position = {o.x - 12.0f, o.y};
@@ -295,6 +309,118 @@ void editSelectedObjectPanel(AppState& app) {
     if (ImGui::InputFloat("fallback draw radius (px)", &drawRadius)) obj->editObject("drawRadius", drawRadius);
 
     ImGui::Separator();
+    ImGui::Text("Burn Controls");
+
+    ImGui::InputDouble("Impulse delta-v (m/s)", &app.impulsiveBurnDeltaV_m_s, 0.0, 0.0, "%.6e");
+    app.impulsiveBurnDeltaV_m_s = std::max(0.0, app.impulsiveBurnDeltaV_m_s);
+
+    if (ImGui::Button("Prograde Impulse")) {
+        app.universe.applyImpulsiveBurnToSelected(app.impulsiveBurnDeltaV_m_s, true);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Retrograde Impulse")) {
+        app.universe.applyImpulsiveBurnToSelected(app.impulsiveBurnDeltaV_m_s, false);
+    }
+
+    bool contBurn = obj->continuousBurnEnabled();
+    if (ImGui::Checkbox("Continuous Burn Enabled", &contBurn)) {
+        obj->setContinuousBurnEnabled(contBurn);
+    }
+
+    double burnAccel = obj->continuousBurnAccelerationMps2();
+    if (ImGui::InputDouble("Continuous burn accel (m/s^2)", &burnAccel, 0.0, 0.0, "%.6e")) {
+        obj->editObject("continuousBurnAcceleration", burnAccel);
+    }
+
+    const int idx = app.universe.selectedIndex();
+
+    //velocity stuff
+    if (idx >= 0) {
+        ImGui::Separator();
+        ImGui::Text("Relative Kinematics");
+
+        const auto bary = app.universe.relativeToBarycenter(idx);
+        ImGui::Text("Relative to barycenter:");
+        ImGui::Text("  v = [%.6e, %.6e] m/s", bary.velocityVector_m_s.x, bary.velocityVector_m_s.y);
+        ImGui::Text("  speed = %.6e m/s", bary.speed_m_s);
+        ImGui::Text("  tangential speed = %.6e m/s", bary.tangentialSpeed_m_s);
+        ImGui::Text("  tangential v = [%.6e, %.6e] m/s",
+            bary.tangentialVelocityVector_m_s.x,
+            bary.tangentialVelocityVector_m_s.y
+        );
+
+        const int strongest = app.universe.strongestGravitySourceIndexFor(idx);
+        if (strongest >= 0) {
+            const auto rel = app.universe.relativeToObject(idx, strongest);
+            ImGui::Text("Relative to strongest gravity source: %s",
+                app.universe.objects()[strongest]->name().c_str()
+            );
+            ImGui::Text("  v = [%.6e, %.6e] m/s", rel.velocityVector_m_s.x, rel.velocityVector_m_s.y);
+            ImGui::Text("  speed = %.6e m/s", rel.speed_m_s);
+            ImGui::Text("  tangential speed = %.6e m/s", rel.tangentialSpeed_m_s);
+            ImGui::Text("  tangential v = [%.6e, %.6e] m/s",
+                rel.tangentialVelocityVector_m_s.x,
+                rel.tangentialVelocityVector_m_s.y
+            );
+        }
+
+        ImGui::Text("Orbital angular momentum z about barycenter: %.6e",
+            obj->orbitalAngularMomentumZ(app.universe.barycenterPosition())
+        );
+    }
+
+    //orbit planning/determination predecessor:
+
+    if (obj->kind() == SpaceObjectKind::SpaceCraft) {
+    ImGui::Separator();
+    ImGui::Text("Spacecraft Mission References");
+
+    int originIdx = obj->originBodyIndex();
+    int targetIdx = obj->targetBodyIndex();
+
+    auto objectNameAt = [&](int index) -> const char* {
+        if (index < 0 || index >= static_cast<int>(app.universe.objects().size())) return "None";
+        return app.universe.objects()[index]->name().c_str();
+    };
+
+    if (ImGui::BeginCombo("Origin body", objectNameAt(originIdx))) {
+        for (int i = 0; i < static_cast<int>(app.universe.objects().size()); ++i) {
+            bool selected = (i == originIdx);
+            if (ImGui::Selectable(app.universe.objects()[i]->name().c_str(), selected)) {
+                obj->setOriginBodyIndex(i);
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    if (ImGui::BeginCombo("Target body", objectNameAt(targetIdx))) {
+        for (int i = 0; i < static_cast<int>(app.universe.objects().size()); ++i) {
+            bool selected = (i == targetIdx);
+            if (ImGui::Selectable(app.universe.objects()[i]->name().c_str(), selected)) {
+                obj->setTargetBodyIndex(i);
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    if (originIdx >= 0) {
+        const auto relOrigin = app.universe.relativeToObject(idx, originIdx);
+        ImGui::Text("Velocity relative to origin body:");
+        ImGui::Text("  v = [%.6e, %.6e] m/s", relOrigin.velocityVector_m_s.x, relOrigin.velocityVector_m_s.y);
+        ImGui::Text("  speed = %.6e m/s", relOrigin.speed_m_s);
+    }
+
+    if (targetIdx >= 0) {
+        const auto relTarget = app.universe.relativeToObject(idx, targetIdx);
+        ImGui::Text("Velocity relative to target body:");
+        ImGui::Text("  v = [%.6e, %.6e] m/s", relTarget.velocityVector_m_s.x, relTarget.velocityVector_m_s.y);
+        ImGui::Text("  speed = %.6e m/s", relTarget.speed_m_s);
+    }
+}
+
+    ImGui::Separator();
 
     if (ImGui::Button("Clear Trail")) obj->clearTrail();
 
@@ -303,6 +429,10 @@ void editSelectedObjectPanel(AppState& app) {
 
 void objectListPanel(AppState& app) {
     ImGui::Begin("Objects");
+
+    ImGui::InputDouble("New object orbital radius (m)", &app.newObjectOrbitRadius_m, 0.0, 0.0, "%.6e");
+    app.newObjectOrbitRadius_m = std::max(1.0, app.newObjectOrbitRadius_m);
+    app.universe.spawnDistanceFromSelected_m = app.newObjectOrbitRadius_m;
 
     if (ImGui::Button("Add LargeBody")) app.universe.addLargeBody();
     ImGui::SameLine();
@@ -509,9 +639,22 @@ int main() {
                 window.close();
             }
 
-            // Keep keyboard only for pause/play.
-            if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Space) {
-                app.universe.paused = !app.universe.paused;
+            if (event.type == sf::Event::KeyPressed) {
+                if (event.key.code == sf::Keyboard::Space) {
+                    app.universe.paused = !app.universe.paused;
+                }
+
+                if (event.key.code == sf::Keyboard::B) {
+                    app.universe.applyImpulsiveBurnToSelected(app.impulsiveBurnDeltaV_m_s, true);
+                }
+
+                if (event.key.code == sf::Keyboard::N) {
+                    app.universe.applyImpulsiveBurnToSelected(app.impulsiveBurnDeltaV_m_s, false);
+                }
+
+                if (event.key.code == sf::Keyboard::T) {
+                    app.universe.toggleContinuousBurnForSelected();
+                }
             }
 
             handleMouseCanvasEvents(app, window, event);

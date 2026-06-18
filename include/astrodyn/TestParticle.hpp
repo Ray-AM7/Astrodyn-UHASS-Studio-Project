@@ -16,10 +16,19 @@ public:
 
     bool editObject(const std::string& variableName, double newValue) override;
 
+    double particleAreaM2() const;
+    double areaDensityKgM2() const;
+    int shapeId() const;
+
+    TestParticleMode mode() const;
+    void setMode(TestParticleMode mode);
+
 private:
     double particleArea_m2_ = 1.0;
     double areaDensity_kg_m2_ = 1.0;
     int shapeId_ = 0;
+
+    TestParticleMode mode_ = TestParticleMode::MonteCarlo;
 };
 
 } // namespace astrodyn

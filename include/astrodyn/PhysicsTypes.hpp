@@ -23,6 +23,11 @@ enum class SpaceObjectKind {
     TestParticle
 };
 
+enum class TestParticleMode {
+    MonteCarlo,
+    StatisticalTracing
+};
+
 struct ForceState {
     Vec2 acceleration_m_s2{0.0, 0.0};
 };
@@ -42,6 +47,14 @@ inline std::string objectKindName(SpaceObjectKind kind) {
         case SpaceObjectKind::SmallBody: return "SmallBody";
         case SpaceObjectKind::SpaceCraft: return "SpaceCraft";
         case SpaceObjectKind::TestParticle: return "TestParticle";
+    }
+    return "Unknown";
+}
+
+inline std::string testParticleModeName(TestParticleMode mode) {
+    switch (mode) {
+        case TestParticleMode::MonteCarlo: return "Monte Carlo";
+        case TestParticleMode::StatisticalTracing: return "Statistical Tracing";
     }
     return "Unknown";
 }

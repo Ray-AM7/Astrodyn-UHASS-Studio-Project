@@ -16,6 +16,10 @@ public:
 
     bool editObject(const std::string& variableName, double newValue) override;
 
+    double densityKgM3() const;
+    double iceContentFraction() const;
+    double averageTempK() const;
+
 private:
     double density_kg_m3_ = 2000.0;
     double iceContent_fraction_ = 0.0;

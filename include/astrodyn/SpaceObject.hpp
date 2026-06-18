@@ -40,6 +40,15 @@ public:
     virtual void setMassKg(double mass_kg);
     virtual void setRadiusM(double radius_m);
 
+    // Spin angular momentum placeholder for 2D.
+    // In real 3D this becomes Vec3.
+    Vec2 spinAngularMomentum() const;
+    void setSpinAngularMomentum(Vec2 h_spin);
+
+    // Orbital angular momentum about a chosen origin.
+    // In 2D this is the z-component of r x p.
+    double orbitalAngularMomentumZ(Vec2 origin_m = {0.0, 0.0}) const;
+
     bool isSelected() const;
     void setSelected(bool selected);
 
@@ -70,8 +79,24 @@ public:
     void clearTrail();
     void pushTrailPoint();
 
+    // Creation/mission metadata.
+    int originBodyIndex() const;
+    void setOriginBodyIndex(int index);
+
+    int targetBodyIndex() const;
+    void setTargetBodyIndex(int index);
+
+    // Continuous burn support for SpaceCraft and TestParticle.
+    bool continuousBurnEnabled() const;
+    void setContinuousBurnEnabled(bool enabled);
+
+    double continuousBurnAccelerationMps2() const;
+    void setContinuousBurnAccelerationMps2(double accel_m_s2);
+
+    // Interface requirement.
     bool editObject(const std::string& variableName, double newValue) override;
 
+    // Still implemented for interface compliance, but Universe now does real N-body propagation.
     void propagateObj(
         double timestep_s,
         PropagationMethod method,
@@ -93,12 +118,20 @@ protected:
     double mass_kg_ = 0.0;
     double radius_m_ = 0.0;
 
+    Vec2 spinAngularMomentum_kg_m2_s_{0.0, 0.0};
+
     bool selected_ = false;
     bool dynamic_ = true;
     bool gravityEnabled_ = false;
     bool affectedByGravity_ = true;
     bool collisionEnabled_ = true;
     bool trailEnabled_ = true;
+
+    int originBodyIndex_ = -1;
+    int targetBodyIndex_ = -1;
+
+    bool continuousBurnEnabled_ = false;
+    double continuousBurnAcceleration_m_s2_ = 0.0;
 
     float drawRadiusPx_ = 5.0f;
     int colorR_ = 255;

@@ -23,10 +23,20 @@ public:
 
     bool editObject(const std::string& variableName, double newValue) override;
 
+    double batteryChargeFraction() const;
+    double fuelKg() const;
+    double engineImpulseNs() const;
+    double thrustN() const;
+    double dragCoefficient() const;
+
+    Vec2 sunVector() const;
+    Vec2 earthVector() const;
+    Vec2 starVector() const;
+
 private:
     double batteryCharge_fraction_ = 1.0;
     double fuel_kg_ = 100.0;
-    double impulse_N_s_ = 0.0;
+    double engineImpulse_N_s_ = 0.0;
     double thrust_N_ = 0.0;
     double dragCoefficient_ = 2.2;
 

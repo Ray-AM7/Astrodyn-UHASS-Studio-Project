@@ -48,6 +48,20 @@ void SpaceObject::setRadiusM(double radius_m) {
     radius_m_ = std::max(0.0, radius_m);
 }
 
+Vec2 SpaceObject::spinAngularMomentum() const {
+    return spinAngularMomentum_kg_m2_s_;
+}
+
+void SpaceObject::setSpinAngularMomentum(Vec2 h_spin) {
+    spinAngularMomentum_kg_m2_s_ = h_spin;
+}
+
+double SpaceObject::orbitalAngularMomentumZ(Vec2 origin_m) const {
+    const Vec2 relR = r_m_ - origin_m;
+    const Vec2 p = momentum();
+    return relR.x * p.y - relR.y * p.x;
+}
+
 bool SpaceObject::isSelected() const { return selected_; }
 void SpaceObject::setSelected(bool selected) { selected_ = selected; }
 
@@ -102,6 +116,38 @@ void SpaceObject::pushTrailPoint() {
     }
 }
 
+int SpaceObject::originBodyIndex() const {
+    return originBodyIndex_;
+}
+
+void SpaceObject::setOriginBodyIndex(int index) {
+    originBodyIndex_ = index;
+}
+
+int SpaceObject::targetBodyIndex() const {
+    return targetBodyIndex_;
+}
+
+void SpaceObject::setTargetBodyIndex(int index) {
+    targetBodyIndex_ = index;
+}
+
+bool SpaceObject::continuousBurnEnabled() const {
+    return continuousBurnEnabled_;
+}
+
+void SpaceObject::setContinuousBurnEnabled(bool enabled) {
+    continuousBurnEnabled_ = enabled;
+}
+
+double SpaceObject::continuousBurnAccelerationMps2() const {
+    return continuousBurnAcceleration_m_s2_;
+}
+
+void SpaceObject::setContinuousBurnAccelerationMps2(double accel_m_s2) {
+    continuousBurnAcceleration_m_s2_ = std::max(0.0, accel_m_s2);
+}
+
 bool SpaceObject::editObject(const std::string& variableName, double newValue) {
     if (variableName == "x") {
         r_m_.x = newValue;
@@ -143,6 +189,18 @@ bool SpaceObject::editObject(const std::string& variableName, double newValue) {
         setDrawRadiusPx(static_cast<float>(newValue));
         return true;
     }
+    if (variableName == "spinAngularMomentumX") {
+        spinAngularMomentum_kg_m2_s_.x = newValue;
+        return true;
+    }
+    if (variableName == "spinAngularMomentumY") {
+        spinAngularMomentum_kg_m2_s_.y = newValue;
+        return true;
+    }
+    if (variableName == "continuousBurnAcceleration") {
+        setContinuousBurnAccelerationMps2(newValue);
+        return true;
+    }
 
     return false;
 }
@@ -175,16 +233,11 @@ void SpaceObject::propagateSymplecticEuler(double dt_s, const ForceState& forces
 }
 
 void SpaceObject::propagateVelocityVerletLike(double dt_s, const ForceState& forces) {
-    // This is a simplified Verlet-like step using current acceleration only.
-    // A true velocity Verlet would need acceleration at both old and new positions,
-    // which belongs in Universe, not inside one isolated object.
     r_m_ += v_m_s_ * dt_s + 0.5 * forces.acceleration_m_s2 * dt_s * dt_s;
     v_m_s_ += forces.acceleration_m_s2 * dt_s;
 }
 
 void SpaceObject::propagateRK4Simple(double dt_s, const ForceState& forces) {
-    // For now this is constant-acceleration RK-like behavior.
-    // Once forces are evaluated inside Universe multiple times, RK4 can become real RK4.
     r_m_ += v_m_s_ * dt_s + 0.5 * forces.acceleration_m_s2 * dt_s * dt_s;
     v_m_s_ += forces.acceleration_m_s2 * dt_s;
 }
